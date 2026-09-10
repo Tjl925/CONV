@@ -2,7 +2,7 @@
 
 ## 原始版本
 
-- 2026-09-10：本地原始源码提交 `57ecc4c`，尚未在鲲鹏上编译或测试。
+- 2026-09-10：原始源码提交 `57ecc4c`，已在超算计算节点完成四个正式 case；源码未修改，运行时增加 `OMP_PROC_BIND=true`。
 - 保留文件：`conv2d.c`、`bench_conv.c`、`README.md`。
 - 目录原有 `conv2d_test` 的构建来源未知，不能用它代表当前源码性能。
 - 官方网页本次未能读取；赛制暂以用户说明及本地 README 为依据。
@@ -25,12 +25,18 @@ Case 单元格填写 `Time(ms) / GFLOPS`。Total 为四个 case 时间之和。
 
 | Version | Case1 | Case2 | Case3 | Case4 | Total(ms) | GFLOPS（汇总） | PASS |
 |---|---|---|---|---|---|---|---|
-| baseline `57ecc4c` | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 未验证 |
+| 原始命令，无显式绑定 | 中止，未取得成绩 | 未运行 | 未运行 | 未运行 | — | — | 仅小规模 PASS |
+| B1：`57ecc4c` + `OMP_PROC_BIND=true` | 1900.91 / 39.6521 | 2064.79 / 40.3121 | 3895.36 / 41.3503 | 8379.90 / 41.2621 | 16240.96 | 40.9740 | 全部 PASS，误差 0 |
+
+四个正式 case 此轮各计时一次，尚不代表多轮稳定性统计或官方排行榜成绩。
+完整环境、执行脚本、编译日志及原始结果保留在本地 results/2026-09-10，不公开上传。
+实验解释见 [首次超算实验](docs/2026-09-10-first-kunpeng-run.md)。
 
 ## 正式命令
 
 ```sh
 gcc -O3 bench_conv.c conv2d.c -o conv2d_test -lm -fopenmp
+export OMP_PROC_BIND=true # B1 唯一运行配置变化；原始官方命令不含此项
 OMP_NUM_THREADS=38 numactl -N 1 ./conv2d_test 4096 6144 39 39 1
 OMP_NUM_THREADS=38 numactl -N 1 ./conv2d_test 6144 4096 41 41 1
 OMP_NUM_THREADS=38 numactl -N 1 ./conv2d_test 4256 6390 55 55 1
@@ -39,9 +45,18 @@ OMP_NUM_THREADS=38 numactl -N 1 ./conv2d_test 6390 4256 81 81 1
 
 先确认调度/资源使用要求并进入获分配计算节点，再运行正式 case。
 `numactl -N 1` 选择 NUMA 节点的 CPU，并不等同于内存绑定或每线程固定核。
-第一轮不额外添加绑定环境变量，记录继承的 OMP/GOMP 环境和实际 CPU/内存允许列表。
+未绑定原始运行已作为诊断记录保留：38 个线程采样时集中在一个 CPU，合计约 100% CPU。
+B1 增加 `OMP_PROC_BIND=true` 后，采样确认线程分别运行在 CPU 38–75。
+以后源码优化与 B1 比较时固定此环境变量；不能将环境变化和源码变化混为一次实验。
 
-## 鲲鹏环境待采集
+## 环境核查
+
+正式性能测试在通过调度系统分配的 ARM 计算节点上运行，使用 GCC 10.3.1。
+编译参数与官方一致，没有额外添加 march、mcpu 或 fast-math 选项。
+已核实实际线程分布及 perf 可用性；硬件拓扑、内部节点和作业信息保留在本地记录中。
+没有额外添加内存绑定。作业已经结束并释放资源。
+
+### 采集范围
 
 - uname -a、lscpu（含 CPU/核/NUMA 映射）、nproc、numactl -H。
 - /proc/self/status 中 Cpus_allowed_list 与 Mems_allowed_list；调度作业信息。

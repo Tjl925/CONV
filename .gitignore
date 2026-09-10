@@ -1,0 +1,5 @@
+/conv2d_test
+/build/
+*.o
+/results/
+/local-notes/
