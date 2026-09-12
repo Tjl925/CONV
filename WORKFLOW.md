@@ -90,7 +90,7 @@ cd C:\Users\86173\Desktop\conv
 
 自动下载该版本最近打包的 ZIP、对应的本轮日志快照和服务器 scores.md，并验证 ZIP SHA-256。
 文件位于 packages/、logs/ 和工作目录根部，不会用远端快照覆盖你正在编辑的本地源码。
-SSH/scp 可能多次提示密码；仅在 password 提示下输入，不把密码写进脚本。
+下载工具只建立一次 SSH 连接，正常每轮只需输入一次密码；不保存密码。ZIP、对应日志和成绩表通过同一连接传回并校验。
 已经完整下载的同名日志目录不会被覆盖。
 
 ## 6. 官网提交与 GitHub
@@ -102,8 +102,8 @@ run.sh 可独立编译测试、无参数、无 Python 或调度工具依赖，�
 本地保存源码和成绩到 GitHub：
 
 ```powershell
-git diff -- CONV/conv2d.c scores.md
-git add CONV/conv2d.c scores.md
+git diff -- CONV/conv2d.c CONV/run.sh scores.md
+git add CONV/conv2d.c CONV/run.sh scores.md
 git commit -m "v01: describe the single optimization"
 git push origin master
 ```
