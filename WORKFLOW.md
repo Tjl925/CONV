@@ -1,101 +1,121 @@
 # CONV 标准流程
 
-## 文件职责
+本地工作目录是这个 Git 仓库。超算工作目录是你的个人目录 `~`。两个地方都把提交文件放在 `CONV/`，工具放在旁边。
 
-- `conv2d.c`：后续唯一需要修改的计算实现。
-- `bench_conv.c`：保持官方原始内容；脚本检查其 SHA-256。
-- `submit.sh`：在登录节点申请资源并启动 run.sh。
-- `run.sh`：在计算节点编译源码快照，逐项运行四个正式尺寸，先校验再计时。
-- `SCORES.md` / `scores.json`：自动维护的人类可读成绩表和结构化数据。
-- `pack.sh`：完整目录备份 ZIP，存到 CONV 的父目录。
+```text
+工作目录/
+├── CONV/       conv2d.c、bench_conv.c、run.sh、conv2d_test
+├── tools/      测试、统计、打包、上传、下载工具
+├── logs/       每轮独立日志、源码快照（不进 Git）
+├── packages/   用于官网下载选择的 ZIP（不进 Git）
+├── scores.md
+└── WORKFLOW.md
+```
 
-依赖：Bash、GCC/OpenMP、numactl、Python 3、Donau 命令。代码和脚本使用 LF 换行。
+## 1. 本地修改、上传（Windows PowerShell）
 
-## 每次实验（超算终端）
+只修改 `CONV/conv2d.c`。版本用 `v00`（原始 baseline）、`v01`、`v02`。一次只改一个优化。
 
-先修改 conv2d.c，一次只改一个优化。用有意义的英文版本名：
+```powershell
+cd C:\Users\86173\Desktop\conv
+.\tools\upload.ps1
+```
+
+此脚本只上传一个文件 conv2d.c，不上传 Windows 二进制，也不触碰服务器的其他文件。
+远端账号与路径保存在 `tools/remote.local.json`，该文件不进 Git。新机器需要自行配置 Remote 和 RemoteRoot。
+
+## 2. 申请计算资源并测试（超算 SSH 终端）
 
 ```bash
-cd ~/CONV
+cd ~
 dlogin
-bash submit.sh v01_local_sum
+bash tools/test.sh v01
 ```
 
-如果调度认证仍有效，dlogin 可省略。编译器参数固定为官方 `gcc -O3 ... -lm -fopenmp`。
-资源申请沿用本账号已验证的整节点独占方式；卷积只使用 NUMA 1 的 38 核。
-这不是申请资源最省的方案，后续资源策略单独比较。运行配置明确增加 OMP_PROC_BIND=true。
+认证仍有效时可省略 dlogin。不要在登录节点直接运行 CONV/run.sh 的重计算。
+test.sh 申请整节点独占，以获得 NUMA 1 的完整 38 核；它仍只启动 38 个 OpenMP 线程。
+运行设置固定为 OMP_PROC_BIND=true、OMP_NUM_THREADS=38、numactl -N 1。此绑定设置应与官方规则允许范围核对。
+任务启动时，工具在 logs/版本-时间-随机数/CONV 保存本轮源码快照，然后执行快照中的 run.sh。
+编译出的 ARM 可执行文件只有在当前源文件仍与快照一致时才复制回主 CONV。
 
-脚本显示独立的 runs/时间戳-版本目录。先看所有 case 都 PASS，再看性能。
-四个 case 全部通过后才更新 SCORES.md；失败时停止，保留已产生的日志和源码快照。
-编译失败也会停止。不要只看调度器 SUCCEEDED，因为官方测试程序可能打印 FAIL 仍返回 0。
+run.sh 无需任何参数，编译并按顺序跑四个 case，原始结果直接输出到 stdout。
+每个 case 内部先校验，再预热和计时；若 FAIL 或缺失 PASS，停止后续 case 并返回非零。
+临时校验文本放在系统临时目录，退出时清理，不污染 CONV。
+工具保存完整 stdout/stderr 到 logs/本轮/run.log；显示和保存可以同时进行。
 
-```bash
-cat SCORES.md
-```
-
-同一版本可以重复提交测试，每次是独立一行，不覆盖历史记录。
-同一个运行目录再次导入成绩不会重复入表。
-不要在打包或同步期间修改源码，也不要在任务仍运行时打包，以免快照不一致。
-发现变慢或错误时，先保存日志，再仅还原本次的 conv2d.c 改动。
-
-Ctrl+C 仅停止前台等待，作业仍继续。不要立即再提交一个：
+Ctrl+C 只停止前台等待，任务仍在后台运行，不要重复提交。查看：
 
 ```bash
 djob 作业编号
-tail -n 30 runs/本次运行目录/job.log
+cat logs/v01.latest
+tail -n 30 logs/本轮目录/run.log
 ```
 
-需要取消自己这一个任务时使用 `dkill -y 作业编号`。
+结束自己某一个任务时：`dkill -y 作业编号`。
 
-## 打包与下载
+## 3. 统计（超算）
 
-确认作业已结束、成绩已入表后：
+任务结束后：
 
 ```bash
-bash pack.sh v01_local_sum
+bash tools/scores.sh v01
+cat scores.md
 ```
 
-命令打印 ZIP 的完整路径与 SHA-256。ZIP 含整个 CONV（源码、脚本、日志、二进制及 .git），
-是个人完整备份，不应公开推送 GitHub。尚未核实官方上传格式，不能称其为已合规的官方提交包。
-隐藏的 .scores.lock 是锁文件，不进备份。
+v01 自动定位到本版本最近一次提交的日志，不用手输时间戳。
+同版本复测保留多行，同一轮重复统计更新同一行。
+四项尺寸、数据和 PASS 都正确且脚本正常结束才记 PASS；失败/未完成不填性能。
+调度器强制终止可能来不及写退出状态，这时记 INCOMPLETE，并以 djob 判断是否超时。
+成绩表是自测，不是官方榜单分数。总 GFLOPS 是四项总 FLOP / 总时间。
 
-切到 Windows PowerShell（不是 SSH 内的远端 shell），在希望保存 ZIP 的目录运行：
+## 4. 核对并用 Linux zip 打包（超算）
 
-```powershell
-scp 用户名@入口地址:CONV-版本-时间.zip .
-Get-FileHash .\CONV-版本-时间.zip -Algorithm SHA256
+```bash
+bash tools/package.sh v01
 ```
 
-替换为 pack.sh 实际打印的文件名。远程路径也可以使用打印的完整路径。
-确认本地与远端哈希一致。备份不需要覆盖解压到已有的 Windows Git 仓库。
+脚本检查当前四个文件与本轮通过测试的 SHA-256 一致，且 CONV 只有这四个普通文件，
+然后实际执行 `zip -r packages/CONV-本轮标识.zip CONV`，验证 ZIP 并生成校验文件。
+修改源码后未经重测不能打包。包名带版本和时间，避免旧 ZIP 残留文件，不覆盖旧包。
+手动 zip 的等效方式是从工作目录执行 `zip -r packages/CONV-唯一名称.zip CONV`，
+但不推荐跳过核对；下载工具使用 package.sh 生成的版本指针。
 
-## 更新 GitHub（Windows 本地 Git 仓库）
-
-超算目前不能直接解析 GitHub，所以由 Windows 同步再推送。
-把本轮的 conv2d.c、SCORES.md 和 scores.json 用 scp 下载到本地仓库；先确认本地没有未保存的独立源码修改。
+## 5. 下载（Windows PowerShell）
 
 ```powershell
-scp 用户名@入口地址:CONV/conv2d.c .
-scp 用户名@入口地址:CONV/SCORES.md .
-scp 用户名@入口地址:CONV/scores.json .
-git diff -- conv2d.c SCORES.md scores.json
-git add conv2d.c SCORES.md scores.json
-git commit -m "v01: local accumulator experiment"
+cd C:\Users\86173\Desktop\conv
+.\tools\download.ps1 v01
+```
+
+自动下载该版本最近打包的 ZIP、对应的本轮日志快照和服务器 scores.md，并验证 ZIP SHA-256。
+文件位于 packages/、logs/ 和工作目录根部，不会用远端快照覆盖你正在编辑的本地源码。
+SSH/scp 可能多次提示密码；仅在 password 提示下输入，不把密码写进脚本。
+已经完整下载的同名日志目录不会被覆盖。
+
+## 6. 官网提交与 GitHub
+
+你在官网选择 packages/ 下本轮 ZIP 上传。ZIP 只有一个 CONV/ 顶层目录，内部为四个文件。
+run.sh 可独立编译测试、无参数、无 Python 或调度工具依赖，不打印成绩汇总供判题器混淆。
+尚未实际提交官网或验证判题系统解析；首次上传仍由你操作，等待它约十五分钟一轮的评测。
+
+本地保存源码和成绩到 GitHub：
+
+```powershell
+git diff -- CONV/conv2d.c scores.md
+git add CONV/conv2d.c scores.md
+git commit -m "v01: describe the single optimization"
 git push origin master
 ```
 
-公开仓库只包含源码、流程和性能摘要；runs/、原始日志、ZIP 和内部环境记录被忽略。
-不使用 git add . 把未经检查的材料一起提交。
+不提交 logs、packages、二进制、私有连接配置。Git 历史位于外层工作目录的 .git，ZIP 内没有 .git。
+如果同一版本对应多份不同源码，请新命名 v02，或在提交说明中明确变化。
 
-## 成绩口径
+## 三条超算命令速查
 
-表中每项是毫秒 / GFLOPS。汇总 GFLOPS 按四项总 FLOP 除以总时间计算，非官方分数。
-当前每 case 正式计时 1 次；要评估稳定性，可完整重复同一版本，保留每次记录。
-自动记录当前源文件快照的 SHA-256，用来识别不同代码版本。
-原始无绑定超时记录与增加绑定后的成绩必须分开。
+```bash
+bash tools/test.sh v01
+bash tools/scores.sh v01
+bash tools/package.sh v01
+```
 
-## 官方提交
-
-这套脚本是超算自测流程，不自动向比赛平台提交，也不读取或伪造排名。
-官方是否接收自定义 run.sh、是否允许运行环境变量、ZIP 目录层级及应包含哪些文件，
-须在实际提交页核实后再制作正式提交包。首次提交仍由参赛者操作。
+等第一条真正结束后再执行后两条；日志、成绩表和代码哈希可以互相核对。

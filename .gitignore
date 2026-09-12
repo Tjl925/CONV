@@ -1,11 +1,6 @@
-/conv2d_test
-/build/
-*.o
-/results/
-/local-notes/
-/runs/
-/artifacts/
-/.scores.lock
-/*.tmp
-/*.log
+/CONV/conv2d_test
+/logs/
+/packages/
+/tools/remote.local.json
 __pycache__/
+*.tmp
