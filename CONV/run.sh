@@ -4,7 +4,7 @@ set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 unset OMP_PLACES GOMP_CPU_AFFINITY OMP_DYNAMIC OMP_THREAD_LIMIT
 export OMP_NUM_THREADS=38 OMP_PROC_BIND=true
-gcc -O3 bench_conv.c conv2d.c -o conv2d_test -lm -fopenmp
+gcc -O3 -fno-tree-vectorize bench_conv.c conv2d.c -o conv2d_test -lm -fopenmp
 output=$(mktemp)
 trap 'rm -f -- "$output"' EXIT
 for case_args in '4096 6144 39 39 1' '6144 4096 41 41 1' '4256 6390 55 55 1' '6390 4256 81 81 1'; do

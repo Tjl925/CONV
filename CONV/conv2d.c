@@ -18,13 +18,15 @@ void conv2d(const CONVFLOAT* input, CONVINT inputHeight, CONVINT inputWidth,
 #pragma omp parallel for
     for (CONVINT j = 0; j < outputHeight; ++j) {
         for (CONVINT i = 0; i < outputWidth; ++i) {
+			CONVFLOAT sum = 0.0f;
             for (CONVINT jk = 0; jk < kernelHeight; ++jk) {
                 for (CONVINT ik = 0; ik < kernelWidth; ++ik) {
                     CONVINT inputIdx = (j + jk) * inputWidth + (i + ik);
                     CONVINT kernelIdx = jk * kernelWidth + ik;
-                    output[j * outputWidth + i] += input[inputIdx] * kernel[kernelIdx];
+					sum += input[inputIdx] * kernel[kernelIdx];
                 }
             }
+			output[j * outputWidth + i] = sum;
         }
     }
 }
