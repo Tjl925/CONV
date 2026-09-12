@@ -10,7 +10,7 @@ if ($RemoteRoot -notmatch '^/[A-Za-z0-9/_.-]+$' -or -not $Remote) { throw 'Confi
 $package = (& ssh -o StrictHostKeyChecking=yes $Remote "cat '$RemoteRoot/packages/$Version.latest'")
 if ($LASTEXITCODE -ne 0) { throw 'No package pointer; run package.sh on the server first.' }
 $package = ($package -join '').Trim()
-if ($package -notmatch "^CONV-($Version-[0-9TZ]+-[0-9]+)\.zip$") { throw 'Unexpected package name' }
+if ($package -notmatch "^CONV-($Version-[0-9]{8}T[0-9]{6}-[0-9]+)\.zip$") { throw 'Unexpected package name' }
 $runId = $Matches[1]
 $packageDir = Join-Path $root 'packages'
 $logDir = Join-Path $root 'logs'

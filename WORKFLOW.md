@@ -15,6 +15,7 @@
 ## 1. 本地修改、上传（Windows PowerShell）
 
 只修改 `CONV/conv2d.c`。版本用 `v00`（原始 baseline）、`v01`、`v02`。一次只改一个优化。
+运行编号使用超算系统本地时间（当前 CST，UTC+08:00），格式 `v01-20260912T220202-13587`，不再使用 UTC 或 Z 后缀。
 
 ```powershell
 cd C:\Users\86173\Desktop\conv
@@ -35,7 +36,7 @@ bash tools/test.sh v01
 认证仍有效时可省略 dlogin。不要在登录节点直接运行 CONV/run.sh 的重计算。
 test.sh 申请整节点独占，以获得 NUMA 1 的完整 38 核；它仍只启动 38 个 OpenMP 线程。
 运行设置固定为 OMP_PROC_BIND=true、OMP_NUM_THREADS=38、numactl -N 1。此绑定设置应与官方规则允许范围核对。
-任务启动时，工具在 logs/版本-时间-随机数/CONV 保存本轮源码快照，然后执行快照中的 run.sh。
+提交任务前，工具在 logs/版本-时间-随机数/CONV 保存本轮源码快照，然后执行快照中的 run.sh。
 编译出的 ARM 可执行文件只有在当前源文件仍与快照一致时才复制回主 CONV。
 
 run.sh 无需任何参数，编译并按顺序跑四个 case，原始结果直接输出到 stdout。
@@ -66,7 +67,7 @@ v01 自动定位到本版本最近一次提交的日志，不用手输时间戳�
 同版本复测保留多行，同一轮重复统计更新同一行。
 四项尺寸、数据和 PASS 都正确且脚本正常结束才记 PASS；失败/未完成不填性能。
 调度器强制终止可能来不及写退出状态，这时记 INCOMPLETE，并以 djob 判断是否超时。
-成绩表是自测，不是官方榜单分数。总 GFLOPS 是四项总 FLOP / 总时间。
+成绩表是自测，不是官方榜单分数。总 GFLOPS 是四个 case 的 GFLOPS 直接相加；Total(ms) 是四项耗时相加。
 
 ## 4. 核对并用 Linux zip 打包（超算）
 

@@ -4,7 +4,7 @@ root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 if [[ ${1:-} == --worker ]]; then
     run_id=${2:?}
-    [[ $run_id =~ ^v[0-9]+-[0-9TZ]+-[0-9]+$ ]] || exit 2
+    [[ $run_id =~ ^v[0-9]+-[0-9]{8}T[0-9]{6}-[0-9]+$ ]] || exit 2
     run="$root/logs/$run_id"
     echo RUNNING > "$run/status"
     trap 'rc=$?; echo "$rc" > "$run/exitcode"; if ((rc == 0)); then echo DONE > "$run/status"; else echo FAILED > "$run/status"; fi' EXIT
@@ -22,7 +22,7 @@ version=${1:?Usage: bash tools/test.sh v00}
 [[ $version =~ ^v[0-9]+$ ]] || { echo 'Version must look like v00 or v01' >&2; exit 2; }
 expected=2548861ae7e29826e454b4c0b098d682f7f04996222e664cd1ea9bc92dd2e927
 [[ $(sha256sum CONV/bench_conv.c | cut -d ' ' -f 1) == "$expected" ]] || { echo 'Original bench_conv.c was changed' >&2; exit 2; }
-run_id="$version-$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM"
+run_id="$version-$(date +%Y%m%dT%H%M%S)-$RANDOM"
 run="$root/logs/$run_id"
 mkdir -p "$run/CONV"
 cp CONV/conv2d.c CONV/bench_conv.c CONV/run.sh "$run/CONV/"

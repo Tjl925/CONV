@@ -6,7 +6,7 @@ cd "$root"
 version=${1:?Usage: bash tools/package.sh v00}
 [[ $version =~ ^v[0-9]+$ ]] || exit 2
 run_id=$(cat "logs/$version.latest")
-[[ $run_id =~ ^v[0-9]+-[0-9TZ]+-[0-9]+$ ]] || exit 2
+[[ $run_id =~ ^v[0-9]+-[0-9]{8}T[0-9]{6}-[0-9]+$ ]] || exit 2
 bash tools/scores.sh "$version"
 sha256sum -c "logs/$run_id/files.sha256"
 [[ $(find CONV -mindepth 1 -maxdepth 1 | wc -l) == 4 ]] || { echo 'CONV must contain only the four required files'; exit 2; }
