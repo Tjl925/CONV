@@ -3,3 +3,9 @@
 *.o
 /results/
 /local-notes/
+/runs/
+/artifacts/
+/.scores.lock
+/*.tmp
+/*.log
+__pycache__/

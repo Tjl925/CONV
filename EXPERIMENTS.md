@@ -1,5 +1,8 @@
 # CONV 实验记录
 
+后续自动成绩表见 [SCORES.md](SCORES.md)，标准命令流程见 [WORKFLOW.md](WORKFLOW.md)。
+下表保留早期实验，SCORES.md 单独记录用户手动 baseline 及后续脚本运行，不覆盖历史。
+
 ## 原始版本
 
 - 2026-09-10：原始源码提交 `57ecc4c`，已在超算计算节点完成四个正式 case；源码未修改，运行时增加 `OMP_PROC_BIND=true`。
