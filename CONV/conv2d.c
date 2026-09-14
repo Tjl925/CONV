@@ -12,7 +12,7 @@ typedef int CONVINT;
  * Input, kernel and output are separate buffers in the official benchmark.
  * Keep jk/ik order and use fused multiply-add to match the ARM reference.
  */
-void conv2d(const CONVFLOAT* input, CONVINT inputHeight, CONVINT inputWidth,
+static void conv_neon(const CONVFLOAT* input, CONVINT inputHeight, CONVINT inputWidth,
             const CONVFLOAT* kernel, CONVINT kernelHeight, CONVINT kernelWidth,
             CONVFLOAT* output)
 {
@@ -81,4 +81,78 @@ void conv2d(const CONVFLOAT* input, CONVINT inputHeight, CONVINT inputWidth,
             out[i] = sum;
         }
     }
+}
+
+#if defined(__aarch64__) && defined(__linux__)
+#include <arm_sve.h>
+#include <sys/auxv.h>
+
+/* v03: vector length is queried per thread; each lane owns one output. */
+__attribute__((target("arch=armv8.2-a+sve")))
+static void conv_sve(const float* input, int H, int W,
+                     const float* kernel, int KH, int KW, float* output)
+{
+    const int OH=H-KH+1, OW=W-KW+1;
+#pragma omp parallel for schedule(static)
+    for (int j=0; j<OH; ++j) {
+        const int lanes=(int)svcntw();
+        const svbool_t all=svptrue_b32();
+        float* out=output+(size_t)j*OW;
+        int i=0;
+        for (; i<=OW-8*lanes; i+=8*lanes) {
+            svfloat32_t a0=svdup_n_f32(0.0f);
+            svfloat32_t a1=svdup_n_f32(0.0f);
+            svfloat32_t a2=svdup_n_f32(0.0f);
+            svfloat32_t a3=svdup_n_f32(0.0f);
+            svfloat32_t a4=svdup_n_f32(0.0f);
+            svfloat32_t a5=svdup_n_f32(0.0f);
+            svfloat32_t a6=svdup_n_f32(0.0f);
+            svfloat32_t a7=svdup_n_f32(0.0f);
+            for (int jk=0; jk<KH; ++jk) {
+                const float* p=input+(size_t)(j+jk)*W+i;
+                const float* k=kernel+(size_t)jk*KW;
+                for (int ik=0; ik<KW; ++ik) {
+                    const svfloat32_t weight=svdup_n_f32(k[ik]);
+                    a0=svmla_f32_m(all,a0,svld1_f32(all,p+ik+0*lanes),weight);
+                    a1=svmla_f32_m(all,a1,svld1_f32(all,p+ik+1*lanes),weight);
+                    a2=svmla_f32_m(all,a2,svld1_f32(all,p+ik+2*lanes),weight);
+                    a3=svmla_f32_m(all,a3,svld1_f32(all,p+ik+3*lanes),weight);
+                    a4=svmla_f32_m(all,a4,svld1_f32(all,p+ik+4*lanes),weight);
+                    a5=svmla_f32_m(all,a5,svld1_f32(all,p+ik+5*lanes),weight);
+                    a6=svmla_f32_m(all,a6,svld1_f32(all,p+ik+6*lanes),weight);
+                    a7=svmla_f32_m(all,a7,svld1_f32(all,p+ik+7*lanes),weight);
+                }
+            }
+            svst1_f32(all,out+i+0*lanes,a0);
+            svst1_f32(all,out+i+1*lanes,a1);
+            svst1_f32(all,out+i+2*lanes,a2);
+            svst1_f32(all,out+i+3*lanes,a3);
+            svst1_f32(all,out+i+4*lanes,a4);
+            svst1_f32(all,out+i+5*lanes,a5);
+            svst1_f32(all,out+i+6*lanes,a6);
+            svst1_f32(all,out+i+7*lanes,a7);
+        }
+        for (; i<OW; i+=lanes) {
+            const svbool_t pg=svwhilelt_b32(i,OW);
+            svfloat32_t a=svdup_n_f32(0.0f);
+            for (int jk=0; jk<KH; ++jk) {
+                const float* p=input+(size_t)(j+jk)*W+i;
+                const float* k=kernel+(size_t)jk*KW;
+                for (int ik=0; ik<KW; ++ik)
+                    a=svmla_f32_m(pg,a,svld1_f32(pg,p+ik),svdup_n_f32(k[ik]));
+            }
+            svst1_f32(pg,out+i,a);
+        }
+    }
+}
+#endif
+void conv2d(const float* input, int H, int W, const float* kernel, int KH, int KW, float* output)
+{
+#if defined(__aarch64__) && defined(__linux__)
+    if (getauxval(AT_HWCAP) & (1UL<<22)) {
+        conv_sve(input,H,W,kernel,KH,KW,output);
+        return;
+    }
+#endif
+    conv_neon(input,H,W,kernel,KH,KW,output);
 }
