@@ -261,6 +261,15 @@ static void pack_columns(float* dst, const float* src, int W,
     int r=0;
     for (; r+3<rows; r+=4) {
         int c=0;
+        /* the four row streams sit 24.6KB apart; pull the next band in
+         * early so the first touches of each line do not stall */
+        if (r+16<rows)
+            for (int p=0; p<cols; p+=16) {
+                __builtin_prefetch(src+(size_t)(r+16)*W+p, 0, 2);
+                __builtin_prefetch(src+(size_t)(r+17)*W+p, 0, 2);
+                __builtin_prefetch(src+(size_t)(r+18)*W+p, 0, 2);
+                __builtin_prefetch(src+(size_t)(r+19)*W+p, 0, 2);
+            }
         for (; c+3<cols; c+=4) {
             float32x4_t x0=vld1q_f32(src+(size_t)r*W+c);
             float32x4_t x1=vld1q_f32(src+(size_t)(r+1)*W+c);
@@ -306,18 +315,20 @@ static int conv_sme(const float* input, int H, int W, const float* kernel, int K
     const int T=KW+15, R=KH+63, stride=(R+15)&~15;
     float* weights=(float*)aligned_alloc(64,(size_t)KH*T*16*sizeof(float));
     if (!weights) return 0;
-    memset(weights,0,(size_t)KH*T*16*sizeof(float));
-    for (int jk=0; jk<KH; ++jk)
-        for (int t=0; t<T; ++t)
-            for (int c=0; c<16; ++c)
-                if (t>=c && t-c<KW)
-                    weights[((size_t)jk*T+t)*16+c]=kernel[(size_t)jk*KW+t-c];
     const int fullCols=(OW/16)*16;
 #pragma omp parallel
     {
         float* panel=(float*)aligned_alloc(64,(size_t)stride*(128+KW-1)*sizeof(float));
         float edge[64*16];
         const int usable=panel && (prctl(64,0,0,0,0)&65535)==64;
+#pragma omp for schedule(static)
+        for (int jk=0; jk<KH; ++jk) {
+            memset(weights+(size_t)jk*T*16,0,(size_t)T*16*sizeof(float));
+            for (int t=0; t<T; ++t)
+                for (int c=0; c<16; ++c)
+                    if (t>=c && t-c<KW)
+                        weights[((size_t)jk*T+t)*16+c]=kernel[(size_t)jk*KW+t-c];
+        }
 #pragma omp for collapse(2) schedule(static)
         for (int j=0; j<OH; j+=64)
             for (int i=0; i<fullCols; i+=128) {
@@ -325,31 +336,30 @@ static int conv_sme(const float* input, int H, int W, const float* kernel, int K
                 int width=fullCols-i; if(width>128) width=128;
                 if (!usable) {
                     conv_rectangle(input,W,kernel,KH,KW,output,OW,j,rows,i,width);
-                    continue;
-                }
-                const int activeRows=rows+KH-1, cols=width+KW-1;
-                pack_columns(panel,input+(size_t)j*W+i,W,activeRows,cols,stride);
-                if(rows<64)
-                    for(int c=0;c<cols;++c)
-                        for(int r=activeRows;r<R;++r)
-                            panel[(size_t)c*stride+r]=0;
-                for (int c=0; c<width; c+=16) {
-                    if(rows==64)
-                        conv_sme64x16(panel+(size_t)c*stride,weights,
-                            output+(size_t)j*OW+i+c,(size_t)stride*4,(size_t)OW*4,KH,T);
-                    else {
-                        conv_sme64x16(panel+(size_t)c*stride,weights,edge,
-                            (size_t)stride*4,16*4,KH,T);
-                        for(int r=0;r<rows;++r)
-                            for(int cc=0;cc<16;++cc)
-                                output[(size_t)(j+r)*OW+i+c+cc]=edge[r*16+cc];
+                } else {
+                    const int activeRows=rows+KH-1, cols=width+KW-1;
+                    pack_columns(panel,input+(size_t)j*W+i,W,activeRows,cols,stride);
+                    if(rows<64)
+                        for(int c=0;c<cols;++c)
+                            for(int r=activeRows;r<R;++r)
+                                panel[(size_t)c*stride+r]=0;
+                    for (int c=0; c<width; c+=16) {
+                        if(rows==64)
+                            conv_sme64x16(panel+(size_t)c*stride,weights,
+                                output+(size_t)j*OW+i+c,(size_t)stride*4,(size_t)OW*4,KH,T);
+                        else {
+                            conv_sme64x16(panel+(size_t)c*stride,weights,edge,
+                                (size_t)stride*4,16*4,KH,T);
+                            for(int r=0;r<rows;++r)
+                                for(int cc=0;cc<16;++cc)
+                                    output[(size_t)(j+r)*OW+i+c+cc]=edge[r*16+cc];
+                        }
                     }
                 }
+                /* right edge strip: last width group of this row block */
+                if (fullCols<OW && i+128>=fullCols)
+                    conv_rectangle(input,W,kernel,KH,KW,output,OW,j,rows,fullCols,OW-fullCols);
             }
-#pragma omp for schedule(static)
-        for(int j=0;j<OH;++j)
-            if(fullCols<OW)
-                conv_rectangle(input,W,kernel,KH,KW,output,OW,j,1,fullCols,OW-fullCols);
         free(panel);
     }
     free(weights);
