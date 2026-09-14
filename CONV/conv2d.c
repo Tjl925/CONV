@@ -153,22 +153,23 @@ static void conv_sve(const float* input, int H, int W,
 #include <sys/prctl.h>
 
 /*
- * v05-C: 16 output rows x 64 output columns, four ZA tiles.
- * Read contiguous input directly: no input transpose or input panel.
- * B is a vertically shifted kernel. For output row r, nonzero terms are
- * visited in t-r (kernel row), ik order, matching the reference recurrence.
- * Use ZA vertical slices on store. Save d8-d15 across streaming transitions.
+ * v04: 64 rows x 16 columns, held in four ZA tiles.
+ * GCC 10 has no SME intrinsics: this leaf function uses the assembler's SME
+ * extension. It saves the callee-saved FP registers across streaming transitions.
+ * A is a column-major input panel; B contains shifted kernel rows.
+ * The outer-product order is jk, then increasing input column: each output
+ * therefore sees exactly the original ik order (with zero-weight padding).
  */
-void conv_sme16x64(const float*, const float*, float*, size_t, size_t, int, int);
+void conv_sme64x16(const float*, const float*, float*, size_t, size_t, int, int);
 __asm__(
 ".pushsection .text\n"
 ".arch armv8.2-a+sve\n"
 ".arch_extension sme\n"
 ".align 4\n"
-".global conv_sme16x64\n"
-".hidden conv_sme16x64\n"
-".type conv_sme16x64, %function\n"
-"conv_sme16x64:\n"
+".global conv_sme64x16\n"
+".hidden conv_sme64x16\n"
+".type conv_sme64x16, %function\n"
+"conv_sme64x16:\n"
 "sub sp, sp, #64\n"
 "stp d8, d9, [sp]\n"
 "stp d10, d11, [sp, #16]\n"
@@ -186,7 +187,7 @@ __asm__(
 "ld1w {z2.s}, p0/z, [x9, #2, mul vl]\n"
 "ld1w {z3.s}, p0/z, [x9, #3, mul vl]\n"
 "ld1w {z4.s}, p0/z, [x1]\n"
-"add x9, x9, #4\n"
+"add x9, x9, x3\n"
 "add x1, x1, #64\n"
 "fmopa za0.s, p0/m, p0/m, z0.s, z4.s\n"
 "fmopa za1.s, p0/m, p0/m, z1.s, z4.s\n"
@@ -200,14 +201,14 @@ __asm__(
 "ld1w {z2.s}, p0/z, [x9, #2, mul vl]\n"
 "ld1w {z3.s}, p0/z, [x9, #3, mul vl]\n"
 "ld1w {z4.s}, p0/z, [x1]\n"
-"add x9, x9, #4\n"
+"add x9, x9, x3\n"
 "add x1, x1, #64\n"
 "ld1w {z16.s}, p0/z, [x9]\n"
 "ld1w {z17.s}, p0/z, [x9, #1, mul vl]\n"
 "ld1w {z18.s}, p0/z, [x9, #2, mul vl]\n"
 "ld1w {z19.s}, p0/z, [x9, #3, mul vl]\n"
 "ld1w {z20.s}, p0/z, [x1]\n"
-"add x9, x9, #4\n"
+"add x9, x9, x3\n"
 "add x1, x1, #64\n"
 "fmopa za0.s, p0/m, p0/m, z0.s, z4.s\n"
 "fmopa za1.s, p0/m, p0/m, z1.s, z4.s\n"
@@ -220,18 +221,18 @@ __asm__(
 "subs w7, w7, #2\n"
 "b.ne 4b\n"
 "5:\n"
-"add x0, x0, x3\n"
+"add x0, x0, #4\n"
 "subs w5, w5, #1\n"
 "b.ne 1b\n"
-"add x10, x2, #64\n"
-"add x11, x10, #64\n"
-"add x13, x11, #64\n"
+"add x10, x2, x4, lsl #4\n"
+"add x11, x10, x4, lsl #4\n"
+"add x13, x11, x4, lsl #4\n"
 "mov w12, #0\n"
 "3:\n"
-"mova z0.s, p0/m, za0v.s[w12, 0]\n"
-"mova z1.s, p0/m, za1v.s[w12, 0]\n"
-"mova z2.s, p0/m, za2v.s[w12, 0]\n"
-"mova z3.s, p0/m, za3v.s[w12, 0]\n"
+"mova z0.s, p0/m, za0h.s[w12, 0]\n"
+"mova z1.s, p0/m, za1h.s[w12, 0]\n"
+"mova z2.s, p0/m, za2h.s[w12, 0]\n"
+"mova z3.s, p0/m, za3h.s[w12, 0]\n"
 "st1w {z0.s}, p0, [x2]\n"
 "st1w {z1.s}, p0, [x10]\n"
 "st1w {z2.s}, p0, [x11]\n"
@@ -250,9 +251,37 @@ __asm__(
 "ldp d14, d15, [sp, #48]\n"
 "add sp, sp, #64\n"
 "ret\n"
-".size conv_sme16x64, .-conv_sme16x64\n"
+".size conv_sme64x16, .-conv_sme64x16\n"
 ".arch armv8-a\n"
 ".popsection\n");
+
+static void pack_columns(float* dst, const float* src, int W,
+                         int rows, int cols, int stride)
+{
+    for (int cb=0;cb<cols;cb+=16) {
+        int ce=cb+16; if(ce>cols) ce=cols;
+    int r=0;
+    for (; r+3<rows; r+=4) {
+        int c=cb;
+        for (; c+3<ce; c+=4) {
+            float32x4_t x0=vld1q_f32(src+(size_t)r*W+c);
+            float32x4_t x1=vld1q_f32(src+(size_t)(r+1)*W+c);
+            float32x4_t x2=vld1q_f32(src+(size_t)(r+2)*W+c);
+            float32x4_t x3=vld1q_f32(src+(size_t)(r+3)*W+c);
+            float32x4x2_t u=vtrnq_f32(x0,x1), v=vtrnq_f32(x2,x3);
+            vst1q_f32(dst+(size_t)c*stride+r, vcombine_f32(vget_low_f32(u.val[0]),vget_low_f32(v.val[0])));
+            vst1q_f32(dst+(size_t)(c+1)*stride+r, vcombine_f32(vget_low_f32(u.val[1]),vget_low_f32(v.val[1])));
+            vst1q_f32(dst+(size_t)(c+2)*stride+r, vcombine_f32(vget_high_f32(u.val[0]),vget_high_f32(v.val[0])));
+            vst1q_f32(dst+(size_t)(c+3)*stride+r, vcombine_f32(vget_high_f32(u.val[1]),vget_high_f32(v.val[1])));
+        }
+        for (; c<ce; ++c)
+            for (int rr=0; rr<4; ++rr) dst[(size_t)c*stride+r+rr]=src[(size_t)(r+rr)*W+c];
+    }
+    for (; r<rows; ++r)
+        for (int c=cb; c<ce; ++c) dst[(size_t)c*stride+r]=src[(size_t)r*W+c];
+
+    }
+}
 
 /* Ordered SVE rectangle, also used for the narrow right edge. */
 __attribute__((target("arch=armv8.2-a+sve")))
@@ -271,44 +300,60 @@ static void conv_rectangle(const float* input, int W, const float* kernel,
             svst1_f32(pg,output+(size_t)(j+r)*OW+i+c,a);
         }
 }
-
 static int conv_sme(const float* input, int H, int W, const float* kernel, int KH, int KW, float* output)
 {
     const int OH=H-KH+1, OW=W-KW+1;
-    if (OH<16 || OW<64 || KH<1 || KW<1 || KH>256 || KW>256 ||
+    if (OH<64 || OW<16 || KH<1 || KW<1 || KH>256 || KW>256 ||
         !(getauxval(AT_HWCAP2)&(1UL<<23)) || (prctl(64,0,0,0,0)&65535)!=64)
         return 0;
-    const int T=KH+15;
-    float* weights=(float*)aligned_alloc(64,(size_t)T*KW*16*sizeof(float));
+    const int T=KW+15, R=KH+63, stride=(R+15)&~15;
+    float* weights=(float*)aligned_alloc(64,(size_t)KH*T*16*sizeof(float));
     if (!weights) return 0;
-    memset(weights,0,(size_t)T*KW*16*sizeof(float));
-    /* ZA rows are output columns; ZA columns are output rows.
-       For output row r, t-r visits kernel rows in increasing order. */
-    for (int t=0;t<T;++t)
-        for (int ik=0;ik<KW;++ik)
-            for (int r=0;r<16;++r)
-                if(t>=r && t-r<KH)
-                    weights[((size_t)t*KW+ik)*16+r]=kernel[(size_t)(t-r)*KW+ik];
-    const int fullRows=(OH/16)*16, fullCols=(OW/64)*64;
+    memset(weights,0,(size_t)KH*T*16*sizeof(float));
+    for (int jk=0; jk<KH; ++jk)
+        for (int t=0; t<T; ++t)
+            for (int c=0; c<16; ++c)
+                if (t>=c && t-c<KW)
+                    weights[((size_t)jk*T+t)*16+c]=kernel[(size_t)jk*KW+t-c];
+    const int fullCols=(OW/16)*16;
 #pragma omp parallel
     {
-        const int usable=(prctl(64,0,0,0,0)&65535)==64;
+        float* panel=(float*)aligned_alloc(64,(size_t)stride*(256+KW-1)*sizeof(float));
+        float edge[64*16];
+        const int usable=panel && (prctl(64,0,0,0,0)&65535)==64;
 #pragma omp for collapse(2) schedule(static)
-        for(int j=0;j<fullRows;j+=16)
-            for(int i=0;i<fullCols;i+=64) {
-                if(usable)
-                    conv_sme16x64(input+(size_t)j*W+i,weights,
-                        output+(size_t)j*OW+i,(size_t)W*4,(size_t)OW*4,T,KW);
-                else
-                    conv_rectangle(input,W,kernel,KH,KW,output,OW,j,16,i,64);
+        for (int j=0; j<OH; j+=64)
+            for (int i=0; i<fullCols; i+=256) {
+                int rows=OH-j; if(rows>64) rows=64;
+                int width=fullCols-i; if(width>256) width=256;
+                if (!usable) {
+                    conv_rectangle(input,W,kernel,KH,KW,output,OW,j,rows,i,width);
+                    continue;
+                }
+                const int activeRows=rows+KH-1, cols=width+KW-1;
+                pack_columns(panel,input+(size_t)j*W+i,W,activeRows,cols,stride);
+                if(rows<64)
+                    for(int c=0;c<cols;++c)
+                        for(int r=activeRows;r<R;++r)
+                            panel[(size_t)c*stride+r]=0;
+                for (int c=0; c<width; c+=16) {
+                    if(rows==64)
+                        conv_sme64x16(panel+(size_t)c*stride,weights,
+                            output+(size_t)j*OW+i+c,(size_t)stride*4,(size_t)OW*4,KH,T);
+                    else {
+                        conv_sme64x16(panel+(size_t)c*stride,weights,edge,
+                            (size_t)stride*4,16*4,KH,T);
+                        for(int r=0;r<rows;++r)
+                            for(int cc=0;cc<16;++cc)
+                                output[(size_t)(j+r)*OW+i+c+cc]=edge[r*16+cc];
+                    }
+                }
             }
 #pragma omp for schedule(static)
-        for(int j=0;j<OH;++j) {
-            if(j>=fullRows)
-                conv_rectangle(input,W,kernel,KH,KW,output,OW,j,1,0,OW);
-            else if(fullCols<OW)
+        for(int j=0;j<OH;++j)
+            if(fullCols<OW)
                 conv_rectangle(input,W,kernel,KH,KW,output,OW,j,1,fullCols,OW-fullCols);
-        }
+        free(panel);
     }
     free(weights);
     return 1;
