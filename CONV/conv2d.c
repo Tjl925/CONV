@@ -146,9 +146,169 @@ static void conv_sve(const float* input, int H, int W,
     }
 }
 #endif
+
+#if defined(__aarch64__) && defined(__linux__)
+#include <stdlib.h>
+#include <sys/prctl.h>
+
+/*
+ * v04: 64 rows x 16 columns, held in four ZA tiles.
+ * GCC 10 has no SME intrinsics: this leaf function uses the assembler's SME
+ * extension. It saves the callee-saved FP registers across streaming transitions.
+ * A is a column-major input panel; B contains shifted kernel rows.
+ * The outer-product order is jk, then increasing input column: each output
+ * therefore sees exactly the original ik order (with zero-weight padding).
+ */
+void conv_sme64x16(const float*, const float*, float*, size_t, size_t, int, int);
+__asm__(
+".pushsection .text\n"
+".arch armv8.2-a+sve\n"
+".arch_extension sme\n"
+".align 4\n"
+".global conv_sme64x16\n"
+".hidden conv_sme64x16\n"
+".type conv_sme64x16, %function\n"
+"conv_sme64x16:\n"
+"sub sp, sp, #64\n"
+"stp d8, d9, [sp]\n"
+"stp d10, d11, [sp, #16]\n"
+"stp d12, d13, [sp, #32]\n"
+"stp d14, d15, [sp, #48]\n"
+"smstart\n"
+"ptrue p0.s\n"
+"zero {za}\n"
+"1:\n"
+"mov x9, x0\n"
+"mov w7, w6\n"
+"2:\n"
+"ld1w {z0.s}, p0/z, [x9]\n"
+"ld1w {z1.s}, p0/z, [x9, #1, mul vl]\n"
+"ld1w {z2.s}, p0/z, [x9, #2, mul vl]\n"
+"ld1w {z3.s}, p0/z, [x9, #3, mul vl]\n"
+"ld1w {z4.s}, p0/z, [x1]\n"
+"add x9, x9, x3\n"
+"add x1, x1, #64\n"
+"fmopa za0.s, p0/m, p0/m, z0.s, z4.s\n"
+"fmopa za1.s, p0/m, p0/m, z1.s, z4.s\n"
+"fmopa za2.s, p0/m, p0/m, z2.s, z4.s\n"
+"fmopa za3.s, p0/m, p0/m, z3.s, z4.s\n"
+"subs w7, w7, #1\n"
+"b.ne 2b\n"
+"add x0, x0, #4\n"
+"subs w5, w5, #1\n"
+"b.ne 1b\n"
+"add x10, x2, x4, lsl #4\n"
+"add x11, x10, x4, lsl #4\n"
+"add x13, x11, x4, lsl #4\n"
+"mov w12, #0\n"
+"3:\n"
+"mova z0.s, p0/m, za0h.s[w12, 0]\n"
+"mova z1.s, p0/m, za1h.s[w12, 0]\n"
+"mova z2.s, p0/m, za2h.s[w12, 0]\n"
+"mova z3.s, p0/m, za3h.s[w12, 0]\n"
+"st1w {z0.s}, p0, [x2]\n"
+"st1w {z1.s}, p0, [x10]\n"
+"st1w {z2.s}, p0, [x11]\n"
+"st1w {z3.s}, p0, [x13]\n"
+"add x2, x2, x4\n"
+"add x10, x10, x4\n"
+"add x11, x11, x4\n"
+"add x13, x13, x4\n"
+"add w12, w12, #1\n"
+"cmp w12, #16\n"
+"b.ne 3b\n"
+"smstop\n"
+"ldp d8, d9, [sp]\n"
+"ldp d10, d11, [sp, #16]\n"
+"ldp d12, d13, [sp, #32]\n"
+"ldp d14, d15, [sp, #48]\n"
+"add sp, sp, #64\n"
+"ret\n"
+".size conv_sme64x16, .-conv_sme64x16\n"
+".arch armv8-a\n"
+".popsection\n");
+
+static void pack_columns(float* dst, const float* src, int W,
+                         int rows, int cols, int stride)
+{
+    int r=0;
+    for (; r+3<rows; r+=4) {
+        int c=0;
+        for (; c+3<cols; c+=4) {
+            float32x4_t x0=vld1q_f32(src+(size_t)r*W+c);
+            float32x4_t x1=vld1q_f32(src+(size_t)(r+1)*W+c);
+            float32x4_t x2=vld1q_f32(src+(size_t)(r+2)*W+c);
+            float32x4_t x3=vld1q_f32(src+(size_t)(r+3)*W+c);
+            float32x4x2_t u=vtrnq_f32(x0,x1), v=vtrnq_f32(x2,x3);
+            vst1q_f32(dst+(size_t)c*stride+r, vcombine_f32(vget_low_f32(u.val[0]),vget_low_f32(v.val[0])));
+            vst1q_f32(dst+(size_t)(c+1)*stride+r, vcombine_f32(vget_low_f32(u.val[1]),vget_low_f32(v.val[1])));
+            vst1q_f32(dst+(size_t)(c+2)*stride+r, vcombine_f32(vget_high_f32(u.val[0]),vget_high_f32(v.val[0])));
+            vst1q_f32(dst+(size_t)(c+3)*stride+r, vcombine_f32(vget_high_f32(u.val[1]),vget_high_f32(v.val[1])));
+        }
+        for (; c<cols; ++c)
+            for (int rr=0; rr<4; ++rr) dst[(size_t)c*stride+r+rr]=src[(size_t)(r+rr)*W+c];
+    }
+    for (; r<rows; ++r)
+        for (int c=0; c<cols; ++c) dst[(size_t)c*stride+r]=src[(size_t)r*W+c];
+}
+
+static int conv_sme(const float* input, int H, int W, const float* kernel, int KH, int KW, float* output)
+{
+    const int OH=H-KH+1, OW=W-KW+1;
+    /* Guard the fixed 512-bit leaf, and bound workspace for general inputs. */
+    if (OH<64 || OW<16 || KH<1 || KW<1 || KH>256 || KW>256 ||
+        !(getauxval(AT_HWCAP2)&(1UL<<23)) || (prctl(64,0,0,0,0)&65535)!=64)
+        return 0;
+    const int T=KW+15, R=KH+63, stride=(R+15)&~15;
+    float* weights=(float*)calloc((size_t)KH*T*16,sizeof(float));
+    if (!weights) return 0;
+    for (int jk=0; jk<KH; ++jk)
+        for (int t=0; t<T; ++t)
+            for (int c=0; c<16; ++c)
+                if (t>=c && t-c<KW)
+                    weights[((size_t)jk*T+t)*16+c]=kernel[(size_t)jk*KW+t-c];
+    const int fullRows=(OH/64)*64, fullCols=(OW/16)*16;
+#pragma omp parallel
+    {
+        float* panel=(float*)malloc((size_t)stride*(128+KW-1)*sizeof(float));
+        const int usable=panel && (prctl(64,0,0,0,0)&65535)==64;
+#pragma omp for schedule(static)
+        for (int j=0; j<fullRows; j+=64) {
+            if (!usable) {
+                conv_neon(input+(size_t)j*W,KH+63,W,kernel,KH,KW,output+(size_t)j*OW);
+                continue;
+            }
+            for (int i=0; i<fullCols; i+=128) {
+                int width=fullCols-i;
+                if (width>128) width=128;
+                pack_columns(panel,input+(size_t)j*W+i,W,R,width+KW-1,stride);
+                for (int c=0; c<width; c+=16)
+                    conv_sme64x16(panel+(size_t)c*stride,weights,
+                        output+(size_t)j*OW+i+c,(size_t)stride*4,(size_t)OW*4,KH,T);
+            }
+            /* At most 15 columns. Keep the same ordered scalar FMA recurrence. */
+            for (int r=0; r<64; ++r)
+                for (int i=fullCols; i<OW; ++i) {
+                    float sum=0;
+                    for (int jk=0; jk<KH; ++jk)
+                        for (int ik=0; ik<KW; ++ik)
+                            sum=fmaf(input[(size_t)(j+r+jk)*W+i+ik],kernel[(size_t)jk*KW+ik],sum);
+                    output[(size_t)(j+r)*OW+i]=sum;
+                }
+        }
+        free(panel);
+    }
+    free(weights);
+    if (fullRows<OH)
+        conv_sve(input+(size_t)fullRows*W,H-fullRows,W,kernel,KH,KW,output+(size_t)fullRows*OW);
+    return 1;
+}
+#endif
+
 void conv2d(const float* input, int H, int W, const float* kernel, int KH, int KW, float* output)
 {
 #if defined(__aarch64__) && defined(__linux__)
+    if (conv_sme(input,H,W,kernel,KH,KW,output)) return;
     if (getauxval(AT_HWCAP) & (1UL<<22)) {
         conv_sve(input,H,W,kernel,KH,KW,output);
         return;
