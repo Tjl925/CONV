@@ -258,12 +258,10 @@ __asm__(
 static void pack_columns(float* dst, const float* src, int W,
                          int rows, int cols, int stride)
 {
-    for (int cb=0;cb<cols;cb+=16) {
-        int ce=cb+16; if(ce>cols) ce=cols;
     int r=0;
     for (; r+3<rows; r+=4) {
-        int c=cb;
-        for (; c+3<ce; c+=4) {
+        int c=0;
+        for (; c+3<cols; c+=4) {
             float32x4_t x0=vld1q_f32(src+(size_t)r*W+c);
             float32x4_t x1=vld1q_f32(src+(size_t)(r+1)*W+c);
             float32x4_t x2=vld1q_f32(src+(size_t)(r+2)*W+c);
@@ -274,14 +272,13 @@ static void pack_columns(float* dst, const float* src, int W,
             vst1q_f32(dst+(size_t)(c+2)*stride+r, vcombine_f32(vget_high_f32(u.val[0]),vget_high_f32(v.val[0])));
             vst1q_f32(dst+(size_t)(c+3)*stride+r, vcombine_f32(vget_high_f32(u.val[1]),vget_high_f32(v.val[1])));
         }
-        for (; c<ce; ++c)
+        for (; c<cols; ++c)
             for (int rr=0; rr<4; ++rr) dst[(size_t)c*stride+r+rr]=src[(size_t)(r+rr)*W+c];
     }
     for (; r<rows; ++r)
-        for (int c=cb; c<ce; ++c) dst[(size_t)c*stride+r]=src[(size_t)r*W+c];
-
-    }
+        for (int c=0; c<cols; ++c) dst[(size_t)c*stride+r]=src[(size_t)r*W+c];
 }
+
 
 /* Ordered SVE rectangle, also used for the narrow right edge. */
 __attribute__((target("arch=armv8.2-a+sve")))
@@ -318,14 +315,14 @@ static int conv_sme(const float* input, int H, int W, const float* kernel, int K
     const int fullCols=(OW/16)*16;
 #pragma omp parallel
     {
-        float* panel=(float*)aligned_alloc(64,(size_t)stride*(256+KW-1)*sizeof(float));
+        float* panel=(float*)aligned_alloc(64,(size_t)stride*(128+KW-1)*sizeof(float));
         float edge[64*16];
         const int usable=panel && (prctl(64,0,0,0,0)&65535)==64;
 #pragma omp for collapse(2) schedule(static)
         for (int j=0; j<OH; j+=64)
-            for (int i=0; i<fullCols; i+=256) {
+            for (int i=0; i<fullCols; i+=128) {
                 int rows=OH-j; if(rows>64) rows=64;
-                int width=fullCols-i; if(width>256) width=256;
+                int width=fullCols-i; if(width>128) width=128;
                 if (!usable) {
                     conv_rectangle(input,W,kernel,KH,KW,output,OW,j,rows,i,width);
                     continue;
