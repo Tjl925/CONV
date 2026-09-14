@@ -252,10 +252,27 @@ static void pack_columns(float* dst, const float* src, int W,
         for (int c=0; c<cols; ++c) dst[(size_t)c*stride+r]=src[(size_t)r*W+c];
 }
 
+
+/* Ordered SVE rectangle, also used for the narrow right edge. */
+__attribute__((target("arch=armv8.2-a+sve")))
+static void conv_rectangle(const float* input, int W, const float* kernel,
+    int KH, int KW, float* output, int OW, int j, int rows, int i, int cols)
+{
+    const int lanes=(int)svcntw();
+    for (int r=0;r<rows;++r)
+        for (int c=0;c<cols;c+=lanes) {
+            svbool_t pg=svwhilelt_b32(c,cols);
+            svfloat32_t a=svdup_n_f32(0);
+            for(int jk=0;jk<KH;++jk)
+                for(int ik=0;ik<KW;++ik)
+                    a=svmla_f32_m(pg,a,svld1_f32(pg,input+(size_t)(j+r+jk)*W+i+c+ik),
+                                 svdup_n_f32(kernel[(size_t)jk*KW+ik]));
+            svst1_f32(pg,output+(size_t)(j+r)*OW+i+c,a);
+        }
+}
 static int conv_sme(const float* input, int H, int W, const float* kernel, int KH, int KW, float* output)
 {
     const int OH=H-KH+1, OW=W-KW+1;
-    /* Guard the fixed 512-bit leaf, and bound workspace for general inputs. */
     if (OH<64 || OW<16 || KH<1 || KW<1 || KH>256 || KW>256 ||
         !(getauxval(AT_HWCAP2)&(1UL<<23)) || (prctl(64,0,0,0,0)&65535)!=64)
         return 0;
@@ -267,42 +284,50 @@ static int conv_sme(const float* input, int H, int W, const float* kernel, int K
             for (int c=0; c<16; ++c)
                 if (t>=c && t-c<KW)
                     weights[((size_t)jk*T+t)*16+c]=kernel[(size_t)jk*KW+t-c];
-    const int fullRows=(OH/64)*64, fullCols=(OW/16)*16;
+    const int fullCols=(OW/16)*16;
 #pragma omp parallel
     {
         float* panel=(float*)malloc((size_t)stride*(128+KW-1)*sizeof(float));
+        float edge[64*16];
         const int usable=panel && (prctl(64,0,0,0,0)&65535)==64;
-#pragma omp for schedule(static)
-        for (int j=0; j<fullRows; j+=64) {
-            if (!usable) {
-                conv_neon(input+(size_t)j*W,KH+63,W,kernel,KH,KW,output+(size_t)j*OW);
-                continue;
-            }
+#pragma omp for collapse(2) schedule(static)
+        for (int j=0; j<OH; j+=64)
             for (int i=0; i<fullCols; i+=128) {
-                int width=fullCols-i;
-                if (width>128) width=128;
-                pack_columns(panel,input+(size_t)j*W+i,W,R,width+KW-1,stride);
-                for (int c=0; c<width; c+=16)
-                    conv_sme64x16(panel+(size_t)c*stride,weights,
-                        output+(size_t)j*OW+i+c,(size_t)stride*4,(size_t)OW*4,KH,T);
-            }
-            /* At most 15 columns. Keep the same ordered scalar FMA recurrence. */
-            for (int r=0; r<64; ++r)
-                for (int i=fullCols; i<OW; ++i) {
-                    float sum=0;
-                    for (int jk=0; jk<KH; ++jk)
-                        for (int ik=0; ik<KW; ++ik)
-                            sum=fmaf(input[(size_t)(j+r+jk)*W+i+ik],kernel[(size_t)jk*KW+ik],sum);
-                    output[(size_t)(j+r)*OW+i]=sum;
+                int rows=OH-j; if(rows>64) rows=64;
+                int width=fullCols-i; if(width>128) width=128;
+                if (!usable) {
+                    conv_rectangle(input,W,kernel,KH,KW,output,OW,j,rows,i,width);
+                    continue;
                 }
-        }
+                const int activeRows=rows+KH-1, cols=width+KW-1;
+                pack_columns(panel,input+(size_t)j*W+i,W,activeRows,cols,stride);
+                if(rows<64)
+                    for(int c=0;c<cols;++c)
+                        for(int r=activeRows;r<R;++r)
+                            panel[(size_t)c*stride+r]=0;
+                for (int c=0; c<width; c+=16) {
+                    if(rows==64)
+                        conv_sme64x16(panel+(size_t)c*stride,weights,
+                            output+(size_t)j*OW+i+c,(size_t)stride*4,(size_t)OW*4,KH,T);
+                    else {
+                        conv_sme64x16(panel+(size_t)c*stride,weights,edge,
+                            (size_t)stride*4,16*4,KH,T);
+                        for(int r=0;r<rows;++r)
+                            for(int cc=0;cc<16;++cc)
+                                output[(size_t)(j+r)*OW+i+c+cc]=edge[r*16+cc];
+                    }
+                }
+            }
+#pragma omp for schedule(static)
+        for(int j=0;j<OH;++j)
+            if(fullCols<OW)
+                conv_rectangle(input,W,kernel,KH,KW,output,OW,j,1,fullCols,OW-fullCols);
         free(panel);
     }
     free(weights);
-    if (fullRows<OH)
-        conv_sve(input+(size_t)fullRows*W,H-fullRows,W,kernel,KH,KW,output+(size_t)fullRows*OW);
     return 1;
 }
+
 #endif
 
 void conv2d(const float* input, int H, int W, const float* kernel, int KH, int KW, float* output)
