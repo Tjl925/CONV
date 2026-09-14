@@ -149,6 +149,7 @@ static void conv_sve(const float* input, int H, int W,
 
 #if defined(__aarch64__) && defined(__linux__)
 #include <stdlib.h>
+#include <string.h>
 #include <sys/prctl.h>
 
 /*
@@ -180,7 +181,7 @@ __asm__(
 "1:\n"
 "mov x9, x0\n"
 "mov w7, w6\n"
-"2:\n"
+"tbz w7, #0, 4f\n"
 "ld1w {z0.s}, p0/z, [x9]\n"
 "ld1w {z1.s}, p0/z, [x9, #1, mul vl]\n"
 "ld1w {z2.s}, p0/z, [x9, #2, mul vl]\n"
@@ -193,7 +194,33 @@ __asm__(
 "fmopa za2.s, p0/m, p0/m, z2.s, z4.s\n"
 "fmopa za3.s, p0/m, p0/m, z3.s, z4.s\n"
 "subs w7, w7, #1\n"
-"b.ne 2b\n"
+"cbz w7, 5f\n"
+"4:\n"
+"ld1w {z0.s}, p0/z, [x9]\n"
+"ld1w {z1.s}, p0/z, [x9, #1, mul vl]\n"
+"ld1w {z2.s}, p0/z, [x9, #2, mul vl]\n"
+"ld1w {z3.s}, p0/z, [x9, #3, mul vl]\n"
+"ld1w {z4.s}, p0/z, [x1]\n"
+"add x9, x9, x3\n"
+"add x1, x1, #64\n"
+"ld1w {z16.s}, p0/z, [x9]\n"
+"ld1w {z17.s}, p0/z, [x9, #1, mul vl]\n"
+"ld1w {z18.s}, p0/z, [x9, #2, mul vl]\n"
+"ld1w {z19.s}, p0/z, [x9, #3, mul vl]\n"
+"ld1w {z20.s}, p0/z, [x1]\n"
+"add x9, x9, x3\n"
+"add x1, x1, #64\n"
+"fmopa za0.s, p0/m, p0/m, z0.s, z4.s\n"
+"fmopa za1.s, p0/m, p0/m, z1.s, z4.s\n"
+"fmopa za2.s, p0/m, p0/m, z2.s, z4.s\n"
+"fmopa za3.s, p0/m, p0/m, z3.s, z4.s\n"
+"fmopa za0.s, p0/m, p0/m, z16.s, z20.s\n"
+"fmopa za1.s, p0/m, p0/m, z17.s, z20.s\n"
+"fmopa za2.s, p0/m, p0/m, z18.s, z20.s\n"
+"fmopa za3.s, p0/m, p0/m, z19.s, z20.s\n"
+"subs w7, w7, #2\n"
+"b.ne 4b\n"
+"5:\n"
 "add x0, x0, #4\n"
 "subs w5, w5, #1\n"
 "b.ne 1b\n"
@@ -277,8 +304,9 @@ static int conv_sme(const float* input, int H, int W, const float* kernel, int K
         !(getauxval(AT_HWCAP2)&(1UL<<23)) || (prctl(64,0,0,0,0)&65535)!=64)
         return 0;
     const int T=KW+15, R=KH+63, stride=(R+15)&~15;
-    float* weights=(float*)calloc((size_t)KH*T*16,sizeof(float));
+    float* weights=(float*)aligned_alloc(64,(size_t)KH*T*16*sizeof(float));
     if (!weights) return 0;
+    memset(weights,0,(size_t)KH*T*16*sizeof(float));
     for (int jk=0; jk<KH; ++jk)
         for (int t=0; t<T; ++t)
             for (int c=0; c<16; ++c)
@@ -287,7 +315,7 @@ static int conv_sme(const float* input, int H, int W, const float* kernel, int K
     const int fullCols=(OW/16)*16;
 #pragma omp parallel
     {
-        float* panel=(float*)malloc((size_t)stride*(128+KW-1)*sizeof(float));
+        float* panel=(float*)aligned_alloc(64,(size_t)stride*(128+KW-1)*sizeof(float));
         float edge[64*16];
         const int usable=panel && (prctl(64,0,0,0,0)&65535)==64;
 #pragma omp for collapse(2) schedule(static)
